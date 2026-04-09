@@ -3,33 +3,34 @@
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <esp_wifi.h>
-#include <set>
 
 AsyncWebServer server(80);
 
 // --- 802.11 CONSTANTS ---
-#define TO_DS   0x01   // bit 8  of frame control byte[1]
-#define FROM_DS 0x02   // bit 9  of frame control byte[1]
-#define MIN_PAYLOAD_LEN 26  // Minimum sane payload: 2 (FC) + 2 (duration) + 3×6 (addrs)
-#define MIN_RSSI -80   // Ignore weak/noisy signals (dBm)
+#define TO_DS   0x01   
+#define FROM_DS 0x02   
+#define MIN_PAYLOAD_LEN 26  
+#define MIN_RSSI -80   
 
-// 802.11 STRUCTURES
-typedef struct {
-  int16_t fctl;
-  int16_t duration;
-  uint8_t addr1[6];
-  uint8_t addr2[6];
-  uint8_t addr3[6];
-  int16_t seqctl;
-  unsigned char payload[];
-} __attribute__((packed)) mac_header_t;
+// --- SAFE STATIC STORAGE ---
+#define MAX_CLIENTS 50
+uint8_t discovered_clients[MAX_CLIENTS][6];
+volatile int client_count = 0;
 
 // Sniffing Globals
 uint8_t target_bssid[6];
-std::set<String> discovered_clients;
+String target_ssid_name = "Unknown"; 
+uint8_t my_ap_mac[6]; 
+
+// State Management
 bool is_sniffing = false;
 unsigned long sniff_start_time = 0;
-const unsigned long SNIFF_DURATION = 10000; // Sniff for 10 seconds
+const unsigned long SNIFF_DURATION = 15000; 
+
+// Pending State Management (THE FIX)
+bool pending_sniff = false;
+unsigned long pending_sniff_time = 0;
+int pending_ch = 0;
 
 // --- UTILITY FUNCTIONS ---
 bool macEqual(const uint8_t *a, const uint8_t *b) {
@@ -52,89 +53,56 @@ void parseBytes(const char* str, char sep, byte* bytes, int maxBytes, int base) 
   }
 }
 
+// --- HIGH PRIORITY CALLBACK ---
 void processPacket(const uint8_t *payload, uint16_t len, int8_t rssi) {
-  // 1. Sanity-check payload length
   if (len < MIN_PAYLOAD_LEN) return;
-
-  // 2. Drop weak signals
   if (rssi < MIN_RSSI) return;
-
-  // 3. Read frame control DS bits
-  uint8_t fc1    = payload[1];
-  bool    to_ds   = (fc1 & TO_DS)   != 0;
-  bool    from_ds = (fc1 & FROM_DS) != 0;
 
   uint8_t *addr1 = (uint8_t *)(payload + 4);
   uint8_t *addr2 = (uint8_t *)(payload + 10);
   uint8_t *addr3 = (uint8_t *)(payload + 16);
 
+  if (macEqual(addr1, my_ap_mac) || macEqual(addr2, my_ap_mac) || macEqual(addr3, my_ap_mac)) {
+    return; 
+  }
+
+  uint8_t fc1    = payload[1];
+  bool    to_ds   = (fc1 & TO_DS)   != 0;
+  bool    from_ds = (fc1 & FROM_DS) != 0;
+
   uint8_t *client = nullptr;
   uint8_t *ap = nullptr;
 
-  // Determine client and AP based on frame direction
   if (to_ds && !from_ds) {
-    // STA -> AP: client is addr2, AP is addr1
-    client = addr2;
-    ap = addr1;
+    client = addr2; ap = addr1;
   } else if (!to_ds && from_ds) {
-    // AP -> STA: AP is addr2, client is addr1
-    client = addr1;
-    ap = addr2;
+    client = addr1; ap = addr2;
   } else if (!to_ds && !from_ds) {
-    // Ad-hoc or similar
-    client = addr2;
-    ap = addr3;
+    client = addr2; ap = addr3;
   } else {
-    return;  // WDS or unsupported
+    return;  
   }
 
-  // **CRITICAL FIX**: Verify this packet is FROM your target AP
-  if (!macEqual(ap, target_bssid)) {
-    Serial.printf("[SKIP] Packet not from target AP. AP: %s vs Target: %s\n", 
-                  macToString(ap).c_str(), macToString(target_bssid).c_str());
-    return;
-  }
-
-  // Skip the router itself
+  if (!macEqual(ap, target_bssid)) return; 
   if (macEqual(client, target_bssid)) return;
+  if (client[0] & 0x01) return; 
 
-  // Skip multicast / broadcast
-  if (client[0] & 0x01) return;
+  for (int i = 0; i < client_count; i++) {
+    if (macEqual(client, discovered_clients[i])) return; 
+  }
 
-  // Register the client
-  String mac = macToString(client);
-  discovered_clients.insert(mac);
-  Serial.printf("[+] Client from TARGET AP: %s\n", mac.c_str());
+  if (client_count < MAX_CLIENTS) {
+    memcpy(discovered_clients[client_count], client, 6);
+    client_count++;
+  }
 }
 
-// --- SNIFFER CALLBACK ---
 void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (!is_sniffing) return;
+  if (type != WIFI_PKT_DATA) return; 
 
-  wifi_promiscuous_pkt_t *pkt     = (wifi_promiscuous_pkt_t *)buf;
-  wifi_pkt_rx_ctrl_t     *rx_ctrl = &pkt->rx_ctrl;
-  uint8_t                *payload =  pkt->payload;
-  uint16_t                len     =  rx_ctrl->sig_len;
-
-  if(type!=WIFI_PKT_DATA) return; // Only process data frames
-
-  processPacket(payload, len, rx_ctrl->rssi);
-  return;
-
-  if (len >= 16) {
-    uint8_t *addr1 = payload + 4;
-    uint8_t *addr2 = payload + 10;
-    uint8_t *addr3 = payload + 16;
-    
-    // Print ALL addresses to find your target
-    Serial.printf("[PKT] Addr1: %02X:%02X:%02X:%02X:%02X:%02X | "
-                  "Addr2: %02X:%02X:%02X:%02X:%02X:%02X | "
-                  "Addr3: %02X:%02X:%02X:%02X:%02X:%02X | RSSI: %d\n",
-                  addr1[0], addr1[1], addr1[2], addr1[3], addr1[4], addr1[5],
-                  addr2[0], addr2[1], addr2[2], addr2[3], addr2[4], addr2[5],
-                  addr3[0], addr3[1], addr3[2], addr3[3], addr3[4], addr3[5],
-                  rx_ctrl->rssi);
-  }
+  wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
+  processPacket(pkt->payload, pkt->rx_ctrl.sig_len, pkt->rx_ctrl.rssi);
 }
 
 // --- HTML FRONTEND ---
@@ -167,14 +135,22 @@ const char index_html[] PROGMEM = R"rawliteral(
   </table>
 
   <div id="targetPanel">
-    <h2 id="targetTitle">Target</h2>
+    <h2 id="targetTitle">Target AP: None</h2>
     <div id="sniffStatus" style="color: #f85149; font-weight: bold;"></div>
     <h3>Connected Clients:</h3>
     <div id="clientList"></div>
   </div>
 
   <script>
-    let sniffInterval;
+    window.onload = () => {
+      fetch('/get_clients').then(r => r.json()).then(data => {
+        if (data.clients.length > 0 || data.active) {
+          document.getElementById('targetPanel').style.display = "block";
+          document.getElementById('targetTitle').innerText = "Target AP: " + data.ssid;
+          updateClientsUI(data);
+        }
+      }).catch(e => console.log("Fresh load."));
+    };
 
     function scan() {
       document.getElementById('status').innerText = "Scanning...";
@@ -191,22 +167,32 @@ const char index_html[] PROGMEM = R"rawliteral(
 
     function startSniff(mac, ch, ssid) {
       document.getElementById('targetPanel').style.display = "block";
-      document.getElementById('targetTitle').innerText = `Target: ${ssid}`;
-      document.getElementById('clientList').innerHTML = "Initializing...";
+      document.getElementById('targetTitle').innerText = "Target AP: " + ssid;
       
-      fetch(`/start_sniff?mac=${mac}&ch=${ch}`).then(() => {
-        if(sniffInterval) clearInterval(sniffInterval);
-        sniffInterval = setInterval(updateClients, 1000);
+      document.getElementById('clientList').innerHTML = "<span style='color:#e3b341;'>Sniffing in progress... The connection will drop temporarily. Please reconnect and refresh this page after 20 seconds.</span>";
+      
+      let encodedSsid = encodeURIComponent(ssid);
+      
+      fetch(`/start_sniff?mac=${mac}&ch=${ch}&ssid=${encodedSsid}`).then(() => {
+        setTimeout(fetchClients, 20000); 
+      }).catch(err => {
+        setTimeout(fetchClients, 20000); 
       });
     }
 
-    function updateClients() {
+    function fetchClients() {
+      document.getElementById('clientList').innerHTML = "Fetching results...";
       fetch('/get_clients').then(r => r.json()).then(data => {
-        let list = data.clients.map(c => `<div class="client-item">MAC: ${c}</div>`).join('');
-        document.getElementById('clientList').innerHTML = list || "Searching for packets...";
-        document.getElementById('sniffStatus').innerText = data.active ? "STATUS: SNIFFING ACTIVE" : "STATUS: SCAN FINISHED";
-        if(!data.active) clearInterval(sniffInterval);
+        updateClientsUI(data);
+      }).catch(() => {
+        document.getElementById('clientList').innerHTML = "<span style='color:red;'>Not connected. Please ensure you are connected to 'ESP32_Tactical' and refresh the page.</span>";
       });
+    }
+
+    function updateClientsUI(data) {
+      let list = data.clients.map(c => `<div class="client-item">MAC: ${c}</div>`).join('');
+      document.getElementById('clientList').innerHTML = list || "No clients found. The network might be empty.";
+      document.getElementById('sniffStatus').innerText = "STATUS: SNIFFING FINISHED";
     }
   </script>
 </body>
@@ -216,7 +202,9 @@ const char index_html[] PROGMEM = R"rawliteral(
 void setup() {
   Serial.begin(115200);
   WiFi.mode(WIFI_AP_STA);
+  
   WiFi.softAP("ESP32_Tactical", "mgmtadmin");
+  esp_read_mac(my_ap_mac, ESP_MAC_WIFI_SOFTAP);
 
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *r){ r->send_P(200, "text/html", index_html); });
 
@@ -235,36 +223,28 @@ void setup() {
   server.on("/start_sniff", HTTP_GET, [](AsyncWebServerRequest *r){
     if(r->hasParam("mac") && r->hasParam("ch")) {
       parseBytes(r->getParam("mac")->value().c_str(), ':', target_bssid, 6, 16);
-
-      Serial.print("Target BSSID: ");
-Serial.println(macToString(target_bssid));
-
-      int ch = r->getParam("ch")->value().toInt();
-      discovered_clients.clear();
+      pending_ch = r->getParam("ch")->value().toInt();
       
-      esp_wifi_set_channel(ch, WIFI_SECOND_CHAN_NONE);
+      if(r->hasParam("ssid")) {
+        target_ssid_name = r->getParam("ssid")->value();
+      } else {
+        target_ssid_name = "Unknown";
+      }
       
-      wifi_promiscuous_filter_t filter = {
-        .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA
-      };
-      esp_wifi_set_promiscuous_filter(&filter);
-      esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
-      esp_wifi_set_promiscuous(true);
+      // DO NOT START SNIFFING HERE.
+      // Just set the flags and let the web server safely return the 200 OK response.
+      pending_sniff = true;
+      pending_sniff_time = millis();
       
-      is_sniffing = true;
-      sniff_start_time = millis();
-      Serial.printf("Started sniffing on channel %d for BSSID %s\n", ch, macToString(target_bssid).c_str());
       r->send(200, "text/plain", "OK");
     }
   });
 
   server.on("/get_clients", HTTP_GET, [](AsyncWebServerRequest *r){
-    String json = "{\"active\":" + String(is_sniffing ? "true" : "false") + ",\"clients\":[";
-    bool first = true;
-    for (auto const& c : discovered_clients) {
-      if (!first) json += ",";
-      json += "\"" + c + "\"";
-      first = false;
+    String json = "{\"active\":" + String(is_sniffing || pending_sniff ? "true" : "false") + ",\"ssid\":\"" + target_ssid_name + "\",\"clients\":[";
+    for (int i = 0; i < client_count; i++) {
+      if (i > 0) json += ",";
+      json += "\"" + macToString(discovered_clients[i]) + "\"";
     }
     json += "]}";
     r->send(200, "application/json", json);
@@ -274,9 +254,33 @@ Serial.println(macToString(target_bssid));
 }
 
 void loop() {
+  // Check if we have a pending sniff request that has waited for 1 second
+  if (pending_sniff && (millis() - pending_sniff_time > 1000)) {
+    pending_sniff = false;
+    
+    // Now that the TCP stack has settled, change the radio state
+    esp_wifi_set_promiscuous(false);
+    WiFi.softAP("ESP32_Tactical", "mgmtadmin", pending_ch);
+    esp_wifi_set_channel(pending_ch, WIFI_SECOND_CHAN_NONE);
+
+    client_count = 0; 
+    
+    wifi_promiscuous_filter_t filter = {
+      .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA
+    };
+    esp_wifi_set_promiscuous_filter(&filter);
+    esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
+    esp_wifi_set_promiscuous(true);
+    
+    is_sniffing = true;
+    sniff_start_time = millis();
+    Serial.println("Sniffing started safely.");
+  }
+
+  // Check if sniffing duration has ended
   if (is_sniffing && (millis() - sniff_start_time > SNIFF_DURATION)) {
     is_sniffing = false;
     esp_wifi_set_promiscuous(false);
-    Serial.println("Sniffing duration ended.");
+    Serial.println("Sniffing ended.");
   }
 }
