@@ -7,8 +7,8 @@
 extern int pending_ch;
 
 // ================= CONFIG =================
-#define AP_NAME        "ESP32_Tactical"
-#define AP_PASS        "mgmtadmin"
+#define AP_NAME        "ESP32"
+#define AP_PASS        "kludge252"
 
 #define DEAUTH_SINGLE  0
 #define DEAUTH_ALL     1

